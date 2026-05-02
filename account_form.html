@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        background: #f6f7f9;
+        margin: 0;
+        padding: 24px;
+      }
+
+      .card {
+        max-width: 900px;
+        margin: 0 auto;
+        background: #fff;
+        border-radius: 16px;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.08);
+        overflow: hidden;
+      }
+
+      .header {
+        padding: 24px 28px;
+        font-size: 20px;
+        font-weight: 700;
+        border-bottom: 1px solid #e5e7eb;
+      }
+
+      .section {
+        padding: 24px 28px;
+        border-bottom: 1px solid #eee;
+      }
+
+      .section h3 {
+        margin: 0 0 16px 0;
+        font-size: 16px;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+      }
+
+      .full {
+        grid-column: 1 / -1;
+      }
+
+      label {
+        display: block;
+        margin-bottom: 8px;
+        font-weight: 600;
+      }
+
+      input, select, textarea {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 14px 16px;
+        border: 1px solid #cfd4dc;
+        border-radius: 12px;
+        font-size: 16px;
+        font-family: Arial, sans-serif;
+      }
+
+      textarea {
+        resize: vertical;
+        min-height: 140px;
+      }
+
+      input[readonly], textarea[readonly] {
+        background: #f3f4f6;
+        color: #374151;
+      }
+
+      .hint {
+        margin-top: 6px;
+        font-size: 12px;
+        color: #6b7280;
+      }
+
+      .actions {
+        display: flex;
+        gap: 16px;
+        padding: 24px 28px;
+      }
+
+      button {
+        min-width: 180px;
+        padding: 14px 18px;
+        border-radius: 12px;
+        border: 1px solid #d97706;
+        font-size: 16px;
+        cursor: pointer;
+      }
+
+      .primary {
+        background: #f97316;
+        color: #fff;
+      }
+
+      .secondary {
+        background: #fff;
+        color: #d97706;
+      }
+
+      .status {
+        padding: 0 28px 24px;
+        font-size: 14px;
+      }
+    </style>
+
+    <script>
+      let saAddressAutocomplete;
+
+      function updateAutoNameFields() {
+        const firstName = (document.getElementById("firstName").value || "").trim();
+        const lastName = (document.getElementById("lastName").value || "").trim();
+
+        const displayName = [lastName, firstName].filter(Boolean).join(", ");
+        const propertyName = [firstName, lastName].filter(Boolean).join(", ");
+
+        document.getElementById("displayName").value = displayName;
+        document.getElementById("nameOnInvoice").value = displayName;
+        document.getElementById("propertyName").value = propertyName;
+      }
+
+      function saInitAddressAutocomplete() {
+        const addressInput = document.getElementById("serviceAddress");
+        if (!addressInput || typeof google === "undefined" || !google.maps || !google.maps.places) {
+          return;
+        }
+
+        saAddressAutocomplete = new google.maps.places.Autocomplete(addressInput, {
+          types: ["address"],
+          componentRestrictions: { country: "us" },
+          fields: ["address_components", "formatted_address"]
+        });
+
+        saAddressAutocomplete.addListener("place_changed", saFillAddressFromPlace);
+      }
+
+      function saFillAddressFromPlace() {
+        const place = saAddressAutocomplete.getPlace();
+        const components = place && place.address_components ? place.address_components : [];
+
+        let streetNumber = "";
+        let route = "";
+        let city = "";
+        let stateShort = "";
+        let postalCode = "";
+
+        components.forEach(component => {
+          const types = component.types || [];
+
+          if (types.includes("street_number")) streetNumber = component.long_name || "";
+          if (types.includes("route")) route = component.long_name || "";
+          if (types.includes("locality")) city = component.long_name || "";
+          if (types.includes("administrative_area_level_1")) stateShort = component.short_name || "";
+          if (types.includes("postal_code")) postalCode = component.long_name || "";
+        });
+
+        const street = [streetNumber, route].filter(Boolean).join(" ").trim();
+
+        if (street) document.getElementById("serviceAddress").value = street;
+        if (city) document.getElementById("city").value = city;
+        if (stateShort) document.getElementById("state").value = stateShort;
+        if (postalCode) document.getElementById("zip").value = postalCode;
+      }
+    </script>
+  </head>
+  <body>
+    <div class="card">
+      <div class="header">Create Account</div>
+
+      <div class="section">
+        <h3>Account</h3>
+        <div class="grid">
+          <div class="full">
+            <label>Account Type</label>
+            <select id="accountType">
+              <option value="Lead">Lead</option>
+              <option value="Client" selected>Client</option>
+            </select>
+          </div>
+
+          <div>
+            <label>First Name</label>
+            <input id="firstName" oninput="updateAutoNameFields()" />
+          </div>
+
+          <div>
+            <label>Last Name</label>
+            <input id="lastName" oninput="updateAutoNameFields()" />
+          </div>
+
+          <div>
+            <label>Display Name</label>
+            <input id="displayName" readonly />
+          </div>
+
+          <div>
+            <label>Name On Invoice</label>
+            <input id="nameOnInvoice" readonly />
+          </div>
+
+          <div class="full">
+            <label>Email (primary)</label>
+            <input id="email" value="<?= prefillEmail ?>" />
+          </div>
+
+          <div class="full">
+            <label>Ticket Subject</label>
+            <input id="ticketSubject" value="<?= prefillTicketSubject ?>" readonly />
+          </div>
+
+          <div class="full">
+            <label>Ticket Body</label>
+            <textarea id="ticketBody" rows="6" readonly><?= prefillTicketBody ?></textarea>
+          </div>
+
+          <div>
+            <label>Phone (primary)</label>
+            <input id="phonePrimary" />
+          </div>
+
+          <div>
+            <label>Primary Contact</label>
+            <select id="primaryContact">
+              <option value="3" selected>Cell</option>
+            </select>
+          </div>
+
+          <div class="full">
+            <label>Service Address</label>
+            <input id="serviceAddress" placeholder="Start typing an address" />
+            <div class="hint">Pick an address suggestion to auto-fill city, state, and zip.</div>
+          </div>
+
+          <div>
+            <label>City</label>
+            <input id="city" />
+          </div>
+
+          <div>
+            <label>State</label>
+            <input id="state" />
+          </div>
+
+          <div>
+            <label>Zip</label>
+            <input id="zip" />
+          </div>
+
+          <div>
+            <label>Property Name</label>
+            <input id="propertyName" readonly />
+          </div>
+
+          <div>
+            <label>Map Code</label>
+            <input id="mapCode" />
+          </div>
+
+          <div>
+            <label>Account Number</label>
+            <input id="accountNumber" />
+          </div>
+
+          <div>
+            <label>Is Taxable?</label>
+            <select id="isTaxable">
+              <option value="true" selected>Yes</option>
+              <option value="false">No</option>
+            </select>
+          </div>
+
+          <div>
+            <label>Tax Reference</label>
+            <input id="taxReference" />
+          </div>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button class="primary" onclick="submitForm()">Account &amp; Ticket</button>
+        <button class="secondary" onclick="closeForm()">Cancel</button>
+      </div>
+
+      <div id="status" class="status"></div>
+    </div>
+
+    <script>
+      const token = "<?= token ?>";
+
+      function getValue(id) {
+        return document.getElementById(id).value;
+      }
+
+      function setStatus(text, isError) {
+        const el = document.getElementById("status");
+        el.textContent = text || "";
+        el.style.color = isError ? "#b91c1c" : "#166534";
+      }
+
+      function submitForm() {
+        setStatus("Submitting...", false);
+
+        const formData = {
+          token,
+          accountType: getValue("accountType"),
+          firstName: getValue("firstName"),
+          lastName: getValue("lastName"),
+          displayName: getValue("displayName"),
+          nameOnInvoice: getValue("nameOnInvoice"),
+          email: getValue("email"),
+          ticketSubject: getValue("ticketSubject"),
+          ticketBody: getValue("ticketBody"),
+          phonePrimary: getValue("phonePrimary"),
+          primaryContact: getValue("primaryContact"),
+          serviceAddress: getValue("serviceAddress"),
+          city: getValue("city"),
+          state: getValue("state"),
+          zip: getValue("zip"),
+          propertyName: getValue("propertyName"),
+          mapCode: getValue("mapCode"),
+          accountNumber: getValue("accountNumber"),
+          isTaxable: getValue("isTaxable") === "true",
+          taxReference: getValue("taxReference")
+        };
+
+        google.script.run
+          .withSuccessHandler(function(result) {
+            setStatus(result.message || "Account created successfully.", false);
+          })
+          .withFailureHandler(function(err) {
+            setStatus(err.message || "Something went wrong.", true);
+          })
+          .saAccountHandleCreateFromForm_(formData);
+      }
+
+      function closeForm() {
+        google.script.host.close();
+      }
+
+      window.addEventListener("load", function() {
+        updateAutoNameFields();
+      });
+    </script>
+
+    <!-- Replace YOUR_GOOGLE_MAPS_API_KEY with your real key -->
+    <script
+      src="https://maps.googleapis.com/maps/api/js?key=AIzaSyCE4b52_9olTt5LY6I2pGSQ4xiUmBMUhTA&libraries=places&callback=saInitAddressAutocomplete"
+      async
+      defer>
+    </script>
+  </body>
+</html>

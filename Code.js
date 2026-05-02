@@ -24,14 +24,14 @@ function saTicketRunCreateTicketsAndLogOnePerThread() {
   // Load email -> entity map from accounts sheet
   const emailToEntityMap = saTicketLoadEmailToEntityMap_();
 
-  // Find unread threads (broad), then filter strictly by msg.getDate() within window
-  const unreadThreads = GmailApp.search(
-    "in:inbox is:unread",
+  // Search inbox threads, not just unread
+  const inboxThreads = GmailApp.search(
+    "in:inbox",
     0,
     SA_TICKET_APP_CONFIG.MAX_THREADS_PER_RUN
   );
 
-  if (!unreadThreads || unreadThreads.length === 0) {
+  if (!inboxThreads || inboxThreads.length === 0) {
     scriptProps.setProperty(lastRunPropertyKey, String(currentTimeMs));
     return;
   }
@@ -39,45 +39,92 @@ function saTicketRunCreateTicketsAndLogOnePerThread() {
   const ticketLogSheet = saTicketGetOrCreateTicketLogSheet_();
 
   try {
-    for (const gmailThread of unreadThreads) {
+    for (const gmailThread of inboxThreads) {
       const gmailThreadId = gmailThread.getId();
       const doneThreadKey = doneThreadPrefix + gmailThreadId;
 
-      // One ticket per thread
-      if (scriptProps.getProperty(doneThreadKey)) {
-        // Optional: mark replies read so it doesn't keep popping up
-        saTicketMarkThreadMessagesRead_(gmailThread);
-        continue;
-      }
+      const newestMessage = saTicketGetNewestMessageInThread_(gmailThread);
+      if (!newestMessage) continue;
 
-      const newestUnreadMessage = saTicketGetNewestUnreadMessageInThread_(gmailThread);
-      if (!newestUnreadMessage) continue;
-
-      // STRICT time window filter based on the received date/time
-      const messageDate = newestUnreadMessage.getDate();
+      const messageDate = newestMessage.getDate();
       const messageMs = messageDate.getTime();
 
-      // Only process emails received within (lastRun -> now)
-      if (!(messageMs > windowStartMs && messageMs <= windowEndMs)) {
-        // Do NOT mark read and do NOT mark processed
+      const doneThreadValue = scriptProps.getProperty(doneThreadKey);
+
+      // Existing processed thread:
+      // if a newer message came in and thread is still Ticketed, add note and switch to Pending
+      if (doneThreadValue) {
+        const processedMs = Date.parse(doneThreadValue);
+
+        if (
+          !isNaN(processedMs) &&
+          messageMs > processedMs &&
+          saTicketThreadHasLabel_(gmailThread, "Ticketed")
+        ) {
+          const savedTicketInfo = saTicketGetSavedTicketInfoForThread_(gmailThreadId);
+
+          if (savedTicketInfo) {
+            const replyBody = saTicketGetReplyOnlyBody_(newestMessage);
+
+            saTicketAddReplyNoteToTicket_(
+              savedTicketInfo.ticketId,
+              savedTicketInfo.ticketNumber,
+              replyBody
+            );
+
+            saTicketRemoveLabelFromThread_(gmailThread, "Ticketed");
+            saTicketApplyLabelToThread_(gmailThread, "Pending");
+
+            // advance processed timestamp so the same latest message is not added again
+            scriptProps.setProperty(doneThreadKey, new Date().toISOString());
+
+            Logger.log(
+              `NOTE ADDED thread=${gmailThreadId} ticketId=${savedTicketInfo.ticketId} ticketNumber=${savedTicketInfo.ticketNumber}`
+            );
+          } else {
+            Logger.log(
+              `SKIP NOTE thread=${gmailThreadId} reason=no saved ticket info found`
+            );
+          }
+        }
+
         continue;
       }
 
-      const gmailMessageId = newestUnreadMessage.getId();
-      const senderEmail = saTicketExtractEmail_(newestUnreadMessage.getFrom() || "").toLowerCase();
+      // Only process brand new threads/messages received within (lastRun -> now)
+      if (!(messageMs > windowStartMs && messageMs <= windowEndMs)) {
+        continue;
+      }
+
+      const gmailMessageId = newestMessage.getId();
+      const senderEmail = saTicketExtractEmail_(newestMessage.getFrom() || "").toLowerCase();
 
       // Exclusion
       if (saTicketIsExcludedSender_(senderEmail)) {
         scriptProps.setProperty(doneThreadKey, new Date().toISOString());
-        newestUnreadMessage.markRead();
+        newestMessage.markRead();
+        saTicketMarkThreadMessagesRead_(gmailThread);
+        saTicketApplyLabelToThread_(gmailThread, "Ticketed");
         continue;
       }
 
-      const ticketSubject = (newestUnreadMessage.getSubject() || "").trim() || "(no subject)";
-      const ticketBody = saTicketGetBestBody_(newestUnreadMessage);
+      const originalSubject = (newestMessage.getSubject() || "").trim() || "(no subject)";
+      const ticketBody = saTicketGetBestBody_(newestMessage);
+      const ticketSubject = saTicketBuildUrgentSubject_(originalSubject, ticketBody);
 
       const entityIdToUse =
         emailToEntityMap[senderEmail] || SA_TICKET_APP_CONFIG.DEFAULT_ENTITY_ID_IF_NOT_FOUND;
+
+      // No account match: notify Ian, but do not mark read and do not label Ticketed
+      if (!entityIdToUse) {
+        saTicketSendNoMatchEmail_(senderEmail, originalSubject, ticketBody);
+        scriptProps.setProperty(doneThreadKey, new Date().toISOString());
+        saTicketApplyLabelToThread_(gmailThread, "No Account");
+        Logger.log(
+          `NO MATCH thread=${gmailThreadId} sender=${senderEmail} subject=${originalSubject}`
+        );
+        continue;
+      }
 
       // 1) Create ticket
       const createTicketResponse = saTicketCreateTicket_(ticketSubject, ticketBody, entityIdToUse);
@@ -109,15 +156,17 @@ function saTicketRunCreateTicketsAndLogOnePerThread() {
         entityIdUsed: entityIdToUse
       });
 
-      // 4) Mark thread processed
+      // 4) Mark thread processed and save ticket mapping
       scriptProps.setProperty(doneThreadKey, new Date().toISOString());
+      saTicketSaveThreadTicketInfo_(gmailThreadId, createdTicketId, createdTicketNumber);
 
-      // Mark read
-      newestUnreadMessage.markRead();
+      // 5) Mark read and label
+      newestMessage.markRead();
       saTicketMarkThreadMessagesRead_(gmailThread);
+      saTicketApplyLabelToThread_(gmailThread, "Ticketed");
 
       Logger.log(
-        `OK thread=${gmailThreadId} msgDate=${messageDate.toISOString()} ticketId=${createdTicketId} ticketNumber=${createdTicketNumber}`
+        `OK thread=${gmailThreadId} msgDate=${messageDate.toISOString()} ticketId=${createdTicketId} ticketNumber=${createdTicketNumber} subject=${ticketSubject}`
       );
     }
   } finally {
@@ -131,12 +180,10 @@ function saTicketRunCreateTicketsAndLogOnePerThread() {
 
 /* -------------------- Thread helpers -------------------- */
 
-function saTicketGetNewestUnreadMessageInThread_(gmailThread) {
+function saTicketGetNewestMessageInThread_(gmailThread) {
   const messages = gmailThread.getMessages();
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].isUnread()) return messages[i];
-  }
-  return null;
+  if (!messages || messages.length === 0) return null;
+  return messages[messages.length - 1];
 }
 
 function saTicketMarkThreadMessagesRead_(gmailThread) {
@@ -144,6 +191,35 @@ function saTicketMarkThreadMessagesRead_(gmailThread) {
   for (const message of messages) {
     if (message.isUnread()) message.markRead();
   }
+}
+
+/* -------------------- Gmail label helpers -------------------- */
+
+function saTicketApplyLabelToThread_(gmailThread, labelName) {
+  if (!gmailThread || !labelName) return;
+
+  let label = GmailApp.getUserLabelByName(labelName);
+  if (!label) {
+    label = GmailApp.createLabel(labelName);
+  }
+
+  gmailThread.addLabel(label);
+}
+
+function saTicketRemoveLabelFromThread_(gmailThread, labelName) {
+  if (!gmailThread || !labelName) return;
+
+  const label = GmailApp.getUserLabelByName(labelName);
+  if (!label) return;
+
+  gmailThread.removeLabel(label);
+}
+
+function saTicketThreadHasLabel_(gmailThread, labelName) {
+  if (!gmailThread || !labelName) return false;
+
+  const labels = gmailThread.getLabels();
+  return labels.some(label => label.getName() === labelName);
 }
 
 /* -------------------- Sheet + logging -------------------- */
@@ -366,3 +442,65 @@ function saTicketInitLastRunNow() {
     String(new Date().getTime())
   );
 }
+
+function saTicketSendNoMatchEmail_(senderEmail, originalSubject, emailBody) {
+  const to = "ianjaylog@cloudstaff.com";
+  const link = saAccountGenerateMagicLink_({
+    email: senderEmail,
+    ticketSubject: originalSubject,
+    ticketBody: emailBody
+  });
+
+  const safeSenderEmail = senderEmail || "";
+  const safeSubject = originalSubject || "(no subject)";
+  const safeBody = (emailBody || "").trim();
+
+  const plainBody =
+    `Email: ${safeSenderEmail}\n` +
+    `Subject: ${safeSubject}\n\n` +
+    `Body:\n${safeBody}\n\n` +
+    `Create account here (valid for 2 days):\n${link}\n`;
+
+  const htmlBody =
+    `<p><strong>Email:</strong> ${saTicketEscapeHtml_(safeSenderEmail)}</p>` +
+    `<p><strong>Subject:</strong> ${saTicketEscapeHtml_(safeSubject)}</p>` +
+    `<p><strong>Body:</strong><br>${saTicketEscapeHtml_(safeBody).replace(/\n/g, "<br>")}</p>` +
+    `<p><strong>Create account here (valid for 2 days):</strong><br>` +
+    `<a href="${link}" target="_blank">${link}</a></p>`;
+
+  Logger.log("NO MATCH LINK=" + link);
+  Logger.log("NO MATCH EMAIL BODY=" + plainBody);
+
+  GmailApp.sendEmail(to, `NO MATCH: ${safeSubject}`, plainBody, {
+    htmlBody: htmlBody
+  });
+}
+
+function saTicketEscapeHtml_(text) {
+  return String(text || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function testSendNoMatchEmail() {
+  saTicketSendNoMatchEmail_(
+    "ianjaylog@cloudstaff.com",
+    "ppootest",
+    "tesatta"
+  );
+}
+
+function testMagicLink() {
+  const link = saAccountGenerateMagicLink_({
+    email: "ianjaylog@cloudstaff.com",
+    ticketSubject: "Test subject",
+    ticketBody: "Test body"
+  });
+  Logger.log("MAGIC LINK: " + link);
+}
+
+
+//test joke
